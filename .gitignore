@@ -1,0 +1,16 @@
+# Environment variables - never commit these
+.env
+*.env
+.spotify_cache
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Node
+node_modules/
+
+# Mac
+.DS_Store
