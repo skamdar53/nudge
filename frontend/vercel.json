@@ -1,5 +1,5 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://YOUR_RAILWAY_URL.railway.app/:path*" }
+    { "source": "/api/:path*", "destination": "https://nudge-production-515e.up.railway.app/:path*" }
   ]
 }
