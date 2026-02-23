@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -16,6 +17,17 @@ from datetime import date, datetime, timedelta, timezone
 load_dotenv()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://nudge-gray.vercel.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 scope = "user-top-read user-library-read playlist-read-private user-read-recently-played"
 MAX_HEARD_IT_SKIPS = 3

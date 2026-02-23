@@ -1,7 +1,7 @@
 export default function LoginPage() {
   function handleLogin() {
-    // Open Spotify login in same tab — callback will redirect back
-    window.location.href = '/api/login'
+    const api = import.meta.env.VITE_API_URL || '/api'
+    window.location.href = `${api}/login`
   }
 
   return (

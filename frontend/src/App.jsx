@@ -4,7 +4,7 @@ import LoadingPage from './pages/LoadingPage'
 import OnboardingPage from './pages/OnboardingPage'
 import HomePage from './pages/HomePage'
 
-const API = '/api'
+const API = import.meta.env.VITE_API_URL || '/api'
 
 export default function App() {
   // 'init' while we check the session — prevents login page flashing

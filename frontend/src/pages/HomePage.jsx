@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
+const API = import.meta.env.VITE_API_URL || '/api'
+
 // ─── Vinyl components ────────────────────────────────────────────────────────
 
 function MysteryVinyl() {
@@ -141,7 +143,7 @@ function FeelTab() {
     if (val.trim().length < 2) { setSuggestions([]); setShowDrop(false); return }
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/search-tracks?q=${encodeURIComponent(val.trim())}`)
+        const res = await fetch(`${API}/search-tracks?q=${encodeURIComponent(val.trim())}`)
         const data = await res.json()
         setSuggestions(data.tracks || [])
         setShowDrop((data.tracks || []).length > 0)
@@ -162,7 +164,7 @@ function FeelTab() {
     setError('')
     setResults(null)
     try {
-      const res = await fetch(`/api/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`)
+      const res = await fetch(`${API}/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Not found')
       setResults(data)
@@ -353,7 +355,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
   function handleRate(type) {
     if (rating === type) return  // already rated this
     setRating(type)
-    fetch('/api/signal', {
+    fetch(`${API}/signal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -475,7 +477,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
                 target="_blank"
                 rel="noreferrer"
                 onClick={() => {
-                  fetch('/api/signal', {
+                  fetch(`${API}/signal`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -644,18 +646,18 @@ function FriendsTab() {
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
-    fetch('/api/friends').then(r => r.json()).then(d => setFriends(d.friends || []))
-    fetch('/api/invite-link').then(r => r.json()).then(d => setInviteLink(d.link || ''))
+    fetch(`${API}/friends`).then(r => r.json()).then(d => setFriends(d.friends || []))
+    fetch(`${API}/invite-link`).then(r => r.json()).then(d => setInviteLink(d.link || ''))
   }, [])
 
   async function handleReact(friendId, emoji) {
-    await fetch('/api/react', {
+    await fetch(`${API}/react`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ friend_id: friendId, emoji }),
     })
     // Refresh friends list to get updated reaction counts
-    const updated = await fetch('/api/friends').then(r => r.json())
+    const updated = await fetch(`${API}/friends`).then(r => r.json())
     setFriends(updated.friends || [])
   }
 
