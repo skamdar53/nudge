@@ -52,3 +52,10 @@ def get_tag_top_artists(api_key: str, tag: str, limit: int = 20) -> list[tuple[s
     data = _call(api_key, "tag.getTopArtists", tag=tag, limit=limit)
     artists = data.get("topartists", {}).get("artist", [])
     return [(a["name"], 100 - (i * 5)) for i, a in enumerate(artists)]
+
+
+def get_similar_tracks(api_key: str, track: str, artist: str, limit: int = 20) -> list[tuple[str, str, float]]:
+    """Returns list of (track_name, artist_name, similarity_score) tuples."""
+    data = _call(api_key, "track.getSimilar", track=track, artist=artist, limit=limit, autocorrect=1)
+    similar = data.get("similartracks", {}).get("track", [])
+    return [(t["name"], t["artist"]["name"], float(t.get("match", 0)) * 100) for t in similar]
