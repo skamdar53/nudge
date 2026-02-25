@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Cookie, Response, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from spotipy.cache_handler import CacheHandler
 from supabase import create_client
 from dotenv import load_dotenv
 from lastfm import get_similar_artists, get_tag_top_artists, get_similar_tracks, RateLimitError
@@ -12,6 +13,7 @@ import random
 import time
 import threading
 import uuid
+import json
 from datetime import date, datetime, timedelta, timezone
 
 load_dotenv()
@@ -37,29 +39,60 @@ sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 
 
+# --- Supabase token cache (survives Railway restarts) ---
+
+class SupabaseCacheHandler(CacheHandler):
+    """Stores Spotify OAuth tokens in Supabase so they survive Railway restarts."""
+
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    def get_cached_token(self):
+        try:
+            row = sb.table("spotify_tokens").select("token_json") \
+                .eq("user_id", self.user_id).execute()
+            if row.data:
+                return row.data[0]["token_json"]
+        except Exception as e:
+            print(f"SupabaseCacheHandler.get error: {e}")
+        return None
+
+    def save_token_to_cache(self, token_info):
+        try:
+            sb.table("spotify_tokens").upsert({
+                "user_id": self.user_id,
+                "token_json": token_info,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception as e:
+            print(f"SupabaseCacheHandler.save error: {e}")
+
+
 # --- Spotify helpers ---
 
-def get_spotify_oauth():
+def get_spotify_oauth(user_id: str):
     return SpotifyOAuth(
         client_id=os.getenv("SPOTIFY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
         redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
         scope=scope,
-        cache_path=".spotify_cache"
+        cache_handler=SupabaseCacheHandler(user_id),
     )
 
-def get_spotify_client():
-    sp_oauth = get_spotify_oauth()
+def get_spotify_client(user_id: str):
+    sp_oauth = get_spotify_oauth(user_id)
+    # get_cached_token validates and auto-refreshes (saving new token via cache_handler)
     token_info = sp_oauth.get_cached_token()
     if not token_info:
         raise HTTPException(status_code=401, detail="Not logged in. Visit /login first.")
-    if sp_oauth.is_token_expired(token_info):
-        token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
     # retries=0 so rate limits fail fast instead of waiting hours to retry
     return spotipy.Spotify(auth=token_info["access_token"], retries=0, requests_timeout=10)
 
-def get_current_user_id():
-    return get_spotify_client().current_user()["id"]
+def get_user_id(nudge_uid: str = Cookie(None)) -> str:
+    """FastAPI dependency: extracts user's Spotify ID from their session cookie."""
+    if not nudge_uid:
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    return nudge_uid
 
 
 # --- Audio feature helpers ---
@@ -304,7 +337,7 @@ def get_signal_boosts(user_id: str) -> dict:
 
 
 def pick_album(user_id: str, genre_filter: str = None) -> dict:
-    sp = get_spotify_client()
+    sp = get_spotify_client(user_id)
 
     # Exclusion list: top tracks + permanently heard albums
     known_urls = set()
@@ -402,7 +435,7 @@ class SignalRequest(BaseModel):
     artist_name: str
     album_name: str
     spotify_url: str
-    signal_type: str  # 'clicked_spotify'
+    signal_type: str  # 'clicked_spotify' | 'liked' | 'disliked'
 
 class ReactionRequest(BaseModel):
     friend_id: str
@@ -417,16 +450,32 @@ def root():
 
 @app.get("/login")
 def login():
-    return RedirectResponse(get_spotify_oauth().get_authorize_url())
+    # No user_id yet — just get the auth URL (no cache handler needed)
+    oauth = SpotifyOAuth(
+        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
+        redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
+        scope=scope,
+    )
+    return RedirectResponse(oauth.get_authorize_url())
 
 @app.get("/callback")
 def callback(code: str):
-    sp_oauth = get_spotify_oauth()
-    token_info = sp_oauth.get_access_token(code)
+    # Exchange auth code for tokens using a temporary OAuth object (no cache yet)
+    temp_oauth = SpotifyOAuth(
+        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
+        redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
+        scope=scope,
+    )
+    token_info = temp_oauth.get_access_token(code)
     access_token = token_info["access_token"]
     sp = spotipy.Spotify(auth=access_token)
     user = sp.current_user()
     user_id = user["id"]
+
+    # Persist token to Supabase (survives Railway restarts)
+    SupabaseCacheHandler(user_id).save_token_to_cache(token_info)
 
     existing = sb.table("users").select("id").eq("id", user_id).execute()
     if not existing.data:
@@ -444,14 +493,22 @@ def callback(code: str):
     thread.start()
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-    return RedirectResponse(frontend_url)
+    response = RedirectResponse(frontend_url)
+    response.set_cookie(
+        key="nudge_uid",
+        value=user_id,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=60 * 60 * 24 * 30,  # 30 days
+    )
+    return response
 
 @app.post("/rebuild-pool")
-def rebuild_pool():
+def rebuild_pool(user_id: str = Depends(get_user_id)):
     """Manually trigger a pool rebuild — useful after clearing the pool."""
-    sp = get_spotify_client()
-    token_info = get_spotify_oauth().get_cached_token()
-    user_id = sp.current_user()["id"]
+    sp = get_spotify_client(user_id)
+    token_info = get_spotify_oauth(user_id).get_cached_token()
     # Force rebuild by clearing the existing pool first
     sb.table("artist_pool").delete().eq("user_id", user_id).execute()
     thread = threading.Thread(
@@ -463,8 +520,7 @@ def rebuild_pool():
     return {"rebuilding": True}
 
 @app.get("/pool-status")
-def pool_status():
-    user_id = get_current_user_id()
+def pool_status(user_id: str = Depends(get_user_id)):
     ready = pool_is_ready(user_id)
     count = 0
     if ready:
@@ -473,8 +529,7 @@ def pool_status():
     return {"ready": ready, "artist_count": count}
 
 @app.post("/preferences")
-def save_preferences(prefs: PreferencesRequest):
-    user_id = get_current_user_id()
+def save_preferences(prefs: PreferencesRequest, user_id: str = Depends(get_user_id)):
     sb.table("preferences").upsert({
         "user_id": user_id,
         "liked_genres": prefs.liked_genres,
@@ -484,14 +539,12 @@ def save_preferences(prefs: PreferencesRequest):
     return {"status": "saved"}
 
 @app.get("/preferences")
-def get_preferences():
-    user_id = get_current_user_id()
+def get_preferences(user_id: str = Depends(get_user_id)):
     result = sb.table("preferences").select("*").eq("user_id", user_id).execute()
     return result.data[0] if result.data else {"liked_genres": [], "explore_genres": []}
 
 @app.get("/today")
-def get_today(genre_filter: str = None):
-    user_id = get_current_user_id()
+def get_today(genre_filter: str = None, user_id: str = Depends(get_user_id)):
     today = date.today().isoformat()
 
     existing = sb.table("recommendations").select("*") \
@@ -530,8 +583,7 @@ def get_today(genre_filter: str = None):
     }
 
 @app.post("/heard-it")
-def heard_it():
-    user_id = get_current_user_id()
+def heard_it(user_id: str = Depends(get_user_id)):
     today = date.today().isoformat()
 
     existing = sb.table("recommendations").select("*") \
@@ -574,12 +626,11 @@ def heard_it():
     }
 
 @app.post("/signal")
-def record_signal(req: SignalRequest):
+def record_signal(req: SignalRequest, user_id: str = Depends(get_user_id)):
     """
-    Called when a user clicks 'Open in Spotify' — a strong intent signal.
-    Used to boost similar artists in future pool scoring.
+    Called when a user clicks 'Open in Spotify' or rates an album.
+    Used to boost/penalize similar artists in future pool scoring.
     """
-    user_id = get_current_user_id()
     # Avoid duplicate signals for the same album+type
     existing = sb.table("signals").select("id") \
         .eq("user_id", user_id) \
@@ -597,12 +648,12 @@ def record_signal(req: SignalRequest):
     return {"recorded": True}
 
 @app.get("/feel")
-def feel_search(song: str, artist: str = ""):
+def feel_search(song: str, artist: str = "", user_id: str = Depends(get_user_id)):
     """
     Search a song, get back songs with the same feel.
     Combines Spotify's recommendation engine + Last.fm listening-pattern similarity.
     """
-    sp = get_spotify_client()
+    sp = get_spotify_client(user_id)
 
     # Find the seed track on Spotify
     query = f"track:{song} artist:{artist}" if artist else f"track:{song}"
@@ -671,14 +722,13 @@ def feel_search(song: str, artist: str = ""):
 
 
 @app.post("/check-listened")
-def check_listened():
+def check_listened(user_id: str = Depends(get_user_id)):
     """
     Called on app open. Checks Spotify's recently_played to see if the user
     actually listened to their last recommendation. Stores a 'listened' signal
     if confirmed — the strongest feedback the system has.
     """
-    user_id = get_current_user_id()
-    sp = get_spotify_client()
+    sp = get_spotify_client(user_id)
 
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     today = date.today().isoformat()
@@ -726,14 +776,14 @@ def check_listened():
 
 
 @app.get("/search-tracks")
-def search_tracks(q: str = ""):
+def search_tracks(q: str = "", user_id: str = Depends(get_user_id)):
     """
     Autocomplete endpoint for the Feel tab search.
     Returns up to 6 matching tracks with name, artist, and thumbnail.
     """
     if not q or len(q.strip()) < 2:
         return {"tracks": []}
-    sp = get_spotify_client()
+    sp = get_spotify_client(user_id)
     try:
         results = sp.search(q=q.strip(), type="track", limit=6)
         tracks = []
@@ -748,7 +798,7 @@ def search_tracks(q: str = ""):
                 "image": img,
             })
         return {"tracks": tracks}
-    except Exception as e:
+    except Exception:
         return {"tracks": []}
 
 
@@ -757,9 +807,8 @@ def search_tracks(q: str = ""):
 VALID_EMOJIS = {"🔥", "👀", "❤️"}
 
 @app.get("/invite-link")
-def get_invite_link():
+def get_invite_link(user_id: str = Depends(get_user_id)):
     """Returns (or generates) the user's personal invite link."""
-    user_id = get_current_user_id()
     row = sb.table("users").select("invite_code").eq("id", user_id).execute()
     code = row.data[0].get("invite_code") if row.data else None
     if not code:
@@ -770,9 +819,8 @@ def get_invite_link():
 
 
 @app.post("/accept-invite")
-def accept_invite(code: str):
+def accept_invite(code: str, user_id: str = Depends(get_user_id)):
     """Called after login when an ?invite= param is in the URL."""
-    user_id = get_current_user_id()
     inviter = sb.table("users").select("id").eq("invite_code", code).execute()
     if not inviter.data:
         raise HTTPException(status_code=404, detail="Invite code not found.")
@@ -792,9 +840,8 @@ def accept_invite(code: str):
 
 
 @app.get("/friends")
-def get_friends():
+def get_friends(user_id: str = Depends(get_user_id)):
     """Returns friends list with their today's nudge and reactions. No Spotify calls."""
-    user_id = get_current_user_id()
     today = date.today().isoformat()
 
     # Collect friend IDs from both sides of the friendship
@@ -844,11 +891,10 @@ def get_friends():
 
 
 @app.post("/react")
-def react_to_nudge(req: ReactionRequest):
+def react_to_nudge(req: ReactionRequest, user_id: str = Depends(get_user_id)):
     """React to a friend's nudge. One reaction per person per day, swappable."""
     if req.emoji not in VALID_EMOJIS:
         raise HTTPException(status_code=400, detail="Invalid emoji.")
-    user_id = get_current_user_id()
     today = date.today().isoformat()
     sb.table("nudge_reactions").upsert({
         "reactor_id": user_id,

@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+const API = import.meta.env.VITE_API_URL || '/api'
+
 const GENRES = [
   'hip-hop', 'rap', 'r&b', 'soul', 'jazz', 'blues',
   'indie', 'alternative', 'rock', 'metal', 'punk',
@@ -56,8 +58,9 @@ export default function OnboardingPage({ onComplete }) {
 
   async function handleDone() {
     setSaving(true)
-    await fetch('/api/preferences', {
+    await fetch(`${API}/preferences`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ liked_genres: liked, explore_genres: explore })
     })

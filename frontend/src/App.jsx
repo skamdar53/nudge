@@ -23,13 +23,13 @@ export default function App() {
     // Clear it from the URL without a reload
     window.history.replaceState({}, '', window.location.pathname)
     try {
-      await fetch(`${API}/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST' })
+      await fetch(`${API}/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST', credentials: 'include' })
     } catch {}
   }
 
   async function checkSession() {
     try {
-      const res = await fetch(`${API}/pool-status`)
+      const res = await fetch(`${API}/pool-status`, { credentials: 'include' })
       if (!res.ok) { setScreen('login'); return }
       const data = await res.json()
       if (data.ready) {
@@ -46,7 +46,7 @@ export default function App() {
   function pollPool() {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/pool-status`)
+        const res = await fetch(`${API}/pool-status`, { credentials: 'include' })
         const data = await res.json()
         if (data.ready) {
           clearInterval(interval)
@@ -63,23 +63,23 @@ export default function App() {
     // Handle ?invite= param if present before loading
     await handleInviteParam()
 
-    const res = await fetch(`${API}/today`)
+    const res = await fetch(`${API}/today`, { credentials: 'include' })
     const data = await res.json()
     setRec(data.todays_nudge)
     setSkipsRemaining(data.skips_remaining)
 
-    const prefRes = await fetch(`${API}/preferences`)
+    const prefRes = await fetch(`${API}/preferences`, { credentials: 'include' })
     const prefs = await prefRes.json()
     const hasPrefs = prefs.liked_genres?.length > 0
 
     setScreen(hasPrefs ? 'home' : 'onboarding')
 
     // Silently check if they actually listened to their last rec via recently_played
-    fetch(`${API}/check-listened`, { method: 'POST' }).catch(() => {})
+    fetch(`${API}/check-listened`, { method: 'POST', credentials: 'include' }).catch(() => {})
   }
 
   async function handleHeardIt() {
-    const res = await fetch(`${API}/heard-it`, { method: 'POST' })
+    const res = await fetch(`${API}/heard-it`, { method: 'POST', credentials: 'include' })
     const data = await res.json()
     if (res.ok) {
       setRec(data.todays_nudge)
