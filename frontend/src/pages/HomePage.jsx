@@ -332,6 +332,7 @@ function FeelTab() {
 function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
   const [phase, setPhase] = useState('mystery')
   const [rating, setRating] = useState(null)  // 'liked' | 'disliked' | null
+  const [loadingNext, setLoadingNext] = useState(false)
   const skipToReveal = useRef(false)
   const todayKey = `nudge_revealed_${new Date().toDateString()}`
 
@@ -348,8 +349,10 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
   }, [rec?.spotify_url])
 
   async function handleHeardIt() {
+    setLoadingNext(true)
     skipToReveal.current = true
     await onHeardIt()
+    setLoadingNext(false)
   }
 
   function handleRate(type) {
@@ -532,19 +535,20 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
         {isRevealed && skipsRemaining > 0 && (
           <button
             onClick={handleHeardIt}
+            disabled={loadingNext}
             style={{
               width: '100%', padding: '14px', borderRadius: '16px',
               border: '1px solid rgba(255,255,255,0.12)',
               background: 'rgba(255,255,255,0.06)',
               backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
               color: 'rgba(255,255,255,0.6)', fontSize: '14px', fontWeight: '500',
-              cursor: 'pointer', transition: 'all 0.2s',
+              cursor: loadingNext ? 'default' : 'pointer', transition: 'all 0.2s',
               animation: 'fade-in-up 0.5s ease 0.3s both',
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = 'rgba(255,255,255,0.9)' }}
+            onMouseEnter={e => { if (!loadingNext) { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = 'rgba(255,255,255,0.9)' } }}
             onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.6)' }}
           >
-            Already heard it · {skipsRemaining} {skipsRemaining === 1 ? 'skip' : 'skips'} left
+            {loadingNext ? 'Finding something new...' : `Already heard it · ${skipsRemaining} ${skipsRemaining === 1 ? 'skip' : 'skips'} left`}
           </button>
 
         )}
