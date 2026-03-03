@@ -402,6 +402,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
       flex: 1, display: 'flex', flexDirection: 'column',
       alignItems: 'center', width: '100%',
       padding: '16px 24px 40px',
+      overflowY: 'auto',
     }}>
       {/* Main content — flex:1 so it fills space and centers the vinyl */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '32px', flex: 1, justifyContent: 'center', paddingBottom: '16px' }}>
