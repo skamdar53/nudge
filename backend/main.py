@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-from spotipy.cache_handler import CacheHandler
+from spotipy.cache_handler import CacheHandler, MemoryCacheHandler
 from supabase import create_client
 from dotenv import load_dotenv
 from lastfm import get_similar_artists, get_tag_top_artists, get_similar_tracks, RateLimitError
@@ -451,23 +451,24 @@ def root():
 
 @app.get("/login")
 def login():
-    # No user_id yet — just get the auth URL (no cache handler needed)
     oauth = SpotifyOAuth(
         client_id=os.getenv("SPOTIFY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
         redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
         scope=scope,
+        cache_handler=MemoryCacheHandler(),
     )
     return RedirectResponse(oauth.get_authorize_url())
 
 @app.get("/callback")
 def callback(code: str):
-    # Exchange auth code for tokens using a temporary OAuth object (no cache yet)
+    # Exchange auth code for tokens — MemoryCacheHandler prevents reading/writing .cache file
     temp_oauth = SpotifyOAuth(
         client_id=os.getenv("SPOTIFY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
         redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
         scope=scope,
+        cache_handler=MemoryCacheHandler(),
     )
     token_info = temp_oauth.get_access_token(code)
     access_token = token_info["access_token"]
@@ -545,17 +546,22 @@ def get_preferences(user_id: str = Depends(get_user_id)):
     return result.data[0] if result.data else {"liked_genres": [], "explore_genres": []}
 
 @app.get("/today")
-def get_today(genre_filter: str = None, user_id: str = Depends(get_user_id)):
+def get_today(genre_filter: str = None, force: bool = False, user_id: str = Depends(get_user_id)):
     today = date.today().isoformat()
 
-    existing = sb.table("recommendations").select("*") \
-        .eq("user_id", user_id).eq("date", today).execute()
-    if existing.data:
-        rec = existing.data[0]
-        return {
-            "todays_nudge": rec,
-            "skips_remaining": MAX_HEARD_IT_SKIPS - rec["skip_count"]
-        }
+    if not force:
+        existing = sb.table("recommendations").select("*") \
+            .eq("user_id", user_id).eq("date", today).execute()
+        if existing.data:
+            rec = existing.data[0]
+            return {
+                "todays_nudge": rec,
+                "skips_remaining": MAX_HEARD_IT_SKIPS - rec["skip_count"]
+            }
+    else:
+        # Clear today's rec so a fresh one is generated with updated pool/prefs
+        sb.table("recommendations").delete() \
+            .eq("user_id", user_id).eq("date", today).execute()
 
     if not genre_filter:
         prefs = sb.table("preferences").select("explore_genres").eq("user_id", user_id).execute()

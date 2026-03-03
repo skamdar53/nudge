@@ -96,6 +96,29 @@ export default function App() {
     apiFetch('/check-listened', { method: 'POST' }).catch(() => {})
   }
 
+  async function onboardingComplete() {
+    // Rebuild the pool now that genre preferences are saved, then get a fresh rec
+    await apiFetch('/rebuild-pool', { method: 'POST' })
+    setScreen('loading')
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiFetch('/pool-status')
+        const data = await res.json()
+        if (data.ready) {
+          clearInterval(interval)
+          const res2 = await apiFetch('/today?force=true')
+          const data2 = await res2.json()
+          setRec(data2.todays_nudge)
+          setSkipsRemaining(data2.skips_remaining)
+          setScreen('home')
+        }
+      } catch {
+        clearInterval(interval)
+        setScreen('login')
+      }
+    }, 3000)
+  }
+
   async function handleHeardIt() {
     const res = await apiFetch('/heard-it', { method: 'POST' })
     const data = await res.json()
@@ -110,7 +133,7 @@ export default function App() {
   if (screen === 'init') return null  // blank while session check runs
   if (screen === 'login') return <LoginPage />
   if (screen === 'loading') return <LoadingPage />
-  if (screen === 'onboarding') return <OnboardingPage onComplete={() => loadToday()} />
+  if (screen === 'onboarding') return <OnboardingPage onComplete={() => onboardingComplete()} />
   if (screen === 'home') return <HomePage rec={rec} skipsRemaining={skipsRemaining} onHeardIt={handleHeardIt} />
   return null
 }

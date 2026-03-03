@@ -2,6 +2,7 @@
 .env
 *.env
 .spotify_cache
+backend/.cache
 
 # Python
 __pycache__/
