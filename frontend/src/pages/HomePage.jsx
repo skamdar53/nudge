@@ -764,11 +764,11 @@ export default function HomePage({ rec, skipsRemaining, onHeardIt }) {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column',
-      height: '100vh', background: '#000',
+      height: '100dvh', background: '#000',
     }}>
       {/* Header */}
       <div style={{
-        textAlign: 'center', padding: '44px 24px 0',
+        textAlign: 'center', padding: 'max(44px, env(safe-area-inset-top)) 24px 0',
         animation: 'fade-in 0.6s ease', flexShrink: 0,
       }}>
         <p style={{ color: 'rgba(255,255,255,0.3)', fontSize: '12px', letterSpacing: '2px', textTransform: 'uppercase' }}>
