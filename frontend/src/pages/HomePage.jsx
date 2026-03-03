@@ -2,6 +2,18 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 
+function apiFetch(path, options = {}) {
+  const uid = localStorage.getItem('nudge_uid')
+  return fetch(`${API}${path}`, {
+    credentials: 'include',
+    ...options,
+    headers: {
+      ...(uid ? { 'X-Nudge-UID': uid } : {}),
+      ...(options.headers || {}),
+    },
+  })
+}
+
 // ─── Vinyl components ────────────────────────────────────────────────────────
 
 function MysteryVinyl() {
@@ -143,7 +155,7 @@ function FeelTab() {
     if (val.trim().length < 2) { setSuggestions([]); setShowDrop(false); return }
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`${API}/search-tracks?q=${encodeURIComponent(val.trim())}`, { credentials: 'include' })
+        const res = await apiFetch(`/search-tracks?q=${encodeURIComponent(val.trim())}`, { credentials: 'include' })
         const data = await res.json()
         setSuggestions(data.tracks || [])
         setShowDrop((data.tracks || []).length > 0)
@@ -164,7 +176,7 @@ function FeelTab() {
     setError('')
     setResults(null)
     try {
-      const res = await fetch(`${API}/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`, { credentials: 'include' })
+      const res = await apiFetch(`/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`, { credentials: 'include' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Not found')
       setResults(data)
@@ -358,7 +370,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
   function handleRate(type) {
     if (rating === type) return  // already rated this
     setRating(type)
-    fetch(`${API}/signal`, {
+    apiFetch(`/signal`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -481,7 +493,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
                 target="_blank"
                 rel="noreferrer"
                 onClick={() => {
-                  fetch(`${API}/signal`, {
+                  apiFetch(`/signal`, {
                     method: 'POST',
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/json' },
@@ -652,19 +664,19 @@ function FriendsTab() {
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
-    fetch(`${API}/friends`, { credentials: 'include' }).then(r => r.json()).then(d => setFriends(d.friends || []))
-    fetch(`${API}/invite-link`, { credentials: 'include' }).then(r => r.json()).then(d => setInviteLink(d.link || ''))
+    apiFetch(`/friends`, { credentials: 'include' }).then(r => r.json()).then(d => setFriends(d.friends || []))
+    apiFetch(`/invite-link`, { credentials: 'include' }).then(r => r.json()).then(d => setInviteLink(d.link || ''))
   }, [])
 
   async function handleReact(friendId, emoji) {
-    await fetch(`${API}/react`, {
+    await apiFetch(`/react`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ friend_id: friendId, emoji }),
     })
     // Refresh friends list to get updated reaction counts
-    const updated = await fetch(`${API}/friends`, { credentials: 'include' }).then(r => r.json())
+    const updated = await apiFetch(`/friends`, { credentials: 'include' }).then(r => r.json())
     setFriends(updated.friends || [])
   }
 

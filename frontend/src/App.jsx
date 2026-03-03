@@ -6,6 +6,20 @@ import HomePage from './pages/HomePage'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 
+// Attaches stored uid as a header on every request (needed for iOS Safari
+// which blocks third-party cookies set via Vercel → Railway redirects)
+function apiFetch(path, options = {}) {
+  const uid = localStorage.getItem('nudge_uid')
+  return fetch(`${API}${path}`, {
+    credentials: 'include',
+    ...options,
+    headers: {
+      ...(uid ? { 'X-Nudge-UID': uid } : {}),
+      ...(options.headers || {}),
+    },
+  })
+}
+
 export default function App() {
   // 'init' while we check the session — prevents login page flashing
   const [screen, setScreen] = useState('init')
@@ -13,6 +27,13 @@ export default function App() {
   const [skipsRemaining, setSkipsRemaining] = useState(3)
 
   useEffect(() => {
+    // Grab uid from URL if redirected back from Spotify OAuth
+    const params = new URLSearchParams(window.location.search)
+    const uid = params.get('uid')
+    if (uid) {
+      localStorage.setItem('nudge_uid', uid)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
     checkSession()
   }, [])
 
@@ -20,16 +41,15 @@ export default function App() {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('invite')
     if (!code) return
-    // Clear it from the URL without a reload
     window.history.replaceState({}, '', window.location.pathname)
     try {
-      await fetch(`${API}/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST', credentials: 'include' })
+      await apiFetch(`/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST' })
     } catch {}
   }
 
   async function checkSession() {
     try {
-      const res = await fetch(`${API}/pool-status`, { credentials: 'include' })
+      const res = await apiFetch('/pool-status')
       if (!res.ok) { setScreen('login'); return }
       const data = await res.json()
       if (data.ready) {
@@ -46,7 +66,7 @@ export default function App() {
   function pollPool() {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/pool-status`, { credentials: 'include' })
+        const res = await apiFetch('/pool-status')
         const data = await res.json()
         if (data.ready) {
           clearInterval(interval)
@@ -60,26 +80,24 @@ export default function App() {
   }
 
   async function loadToday() {
-    // Handle ?invite= param if present before loading
     await handleInviteParam()
 
-    const res = await fetch(`${API}/today`, { credentials: 'include' })
+    const res = await apiFetch('/today')
     const data = await res.json()
     setRec(data.todays_nudge)
     setSkipsRemaining(data.skips_remaining)
 
-    const prefRes = await fetch(`${API}/preferences`, { credentials: 'include' })
+    const prefRes = await apiFetch('/preferences')
     const prefs = await prefRes.json()
     const hasPrefs = prefs.liked_genres?.length > 0
 
     setScreen(hasPrefs ? 'home' : 'onboarding')
 
-    // Silently check if they actually listened to their last rec via recently_played
-    fetch(`${API}/check-listened`, { method: 'POST', credentials: 'include' }).catch(() => {})
+    apiFetch('/check-listened', { method: 'POST' }).catch(() => {})
   }
 
   async function handleHeardIt() {
-    const res = await fetch(`${API}/heard-it`, { method: 'POST', credentials: 'include' })
+    const res = await apiFetch('/heard-it', { method: 'POST' })
     const data = await res.json()
     if (res.ok) {
       setRec(data.todays_nudge)

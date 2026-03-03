@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Cookie, Response, Depends
+from fastapi import FastAPI, HTTPException, Cookie, Response, Depends, Header
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -88,11 +88,12 @@ def get_spotify_client(user_id: str):
     # retries=0 so rate limits fail fast instead of waiting hours to retry
     return spotipy.Spotify(auth=token_info["access_token"], retries=0, requests_timeout=10)
 
-def get_user_id(nudge_uid: str = Cookie(None)) -> str:
-    """FastAPI dependency: extracts user's Spotify ID from their session cookie."""
-    if not nudge_uid:
+def get_user_id(nudge_uid: str = Cookie(None), x_nudge_uid: str = Header(None)) -> str:
+    """FastAPI dependency: extracts user's Spotify ID from cookie or X-Nudge-UID header."""
+    uid = nudge_uid or x_nudge_uid
+    if not uid:
         raise HTTPException(status_code=401, detail="Not logged in.")
-    return nudge_uid
+    return uid
 
 
 # --- Audio feature helpers ---
@@ -493,7 +494,7 @@ def callback(code: str):
     thread.start()
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-    response = RedirectResponse(frontend_url)
+    response = RedirectResponse(f"{frontend_url}?uid={user_id}")
     response.set_cookie(
         key="nudge_uid",
         value=user_id,

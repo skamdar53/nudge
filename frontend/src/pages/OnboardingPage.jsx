@@ -2,6 +2,18 @@ import { useState } from 'react'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 
+function apiFetch(path, options = {}) {
+  const uid = localStorage.getItem('nudge_uid')
+  return fetch(`${API}${path}`, {
+    credentials: 'include',
+    ...options,
+    headers: {
+      ...(uid ? { 'X-Nudge-UID': uid } : {}),
+      ...(options.headers || {}),
+    },
+  })
+}
+
 const GENRES = [
   'hip-hop', 'rap', 'r&b', 'soul', 'jazz', 'blues',
   'indie', 'alternative', 'rock', 'metal', 'punk',
@@ -58,9 +70,8 @@ export default function OnboardingPage({ onComplete }) {
 
   async function handleDone() {
     setSaving(true)
-    await fetch(`${API}/preferences`, {
+    await apiFetch('/preferences', {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ liked_genres: liked, explore_genres: explore })
     })
