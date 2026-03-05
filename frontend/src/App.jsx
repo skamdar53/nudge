@@ -39,9 +39,10 @@ export default function App() {
 
   async function handleInviteParam() {
     const params = new URLSearchParams(window.location.search)
-    const code = params.get('invite')
+    const code = params.get('invite') || localStorage.getItem('pending_invite')
     if (!code) return
     window.history.replaceState({}, '', window.location.pathname)
+    localStorage.removeItem('pending_invite')
     try {
       await apiFetch(`/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST' })
     } catch {}
