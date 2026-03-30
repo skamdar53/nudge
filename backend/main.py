@@ -392,7 +392,7 @@ def pick_album(user_id: str, genre_filter: str = None) -> dict:
             "score": r["similarity_score"] * boosts.get(r["artist_name"].lower(), 1.0)
         } for r in pool_data.data]
 
-    # Fetch albums from artists in pool — try up to 20 to have enough candidates
+    # Fetch albums from artists in pool — 1 album per artist to avoid same-artist streaks
     candidates = []
     for artist in artist_pool[:20]:
         try:
@@ -408,6 +408,7 @@ def pick_album(user_id: str, genre_filter: str = None) -> dict:
                         "spotify_url": url,
                         "image": album["images"][0]["url"] if album["images"] else None,
                     })
+                    break  # one album per artist
         except Exception:
             continue
 
