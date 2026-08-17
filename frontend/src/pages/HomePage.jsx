@@ -1,45 +1,61 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-
-const API = import.meta.env.VITE_API_URL || '/api'
-
-function apiFetch(path, options = {}) {
-  const uid = localStorage.getItem('nudge_uid')
-  return fetch(`${API}${path}`, {
-    credentials: 'include',
-    ...options,
-    headers: {
-      ...(uid ? { 'X-Nudge-UID': uid } : {}),
-      ...(options.headers || {}),
-    },
-  })
-}
+import { useState, useEffect, useRef } from 'react'
+import { apiFetch } from '../api'
 
 // ─── Vinyl components ────────────────────────────────────────────────────────
 
-function MysteryVinyl() {
+const VINYL_SIZE = '280px'
+const GROOVE_RADII = [52, 84, 112, 132]
+
+const centered = {
+  position: 'absolute', top: '50%', left: '50%',
+  transform: 'translate(-50%, -50%)',
+}
+
+function VinylGrooves({ opacity }) {
+  return GROOVE_RADII.map(r => (
+    <div key={r} style={{
+      ...centered,
+      width: `${r * 2}px`, height: `${r * 2}px`,
+      borderRadius: '50%', border: `1px solid rgba(255,255,255,${opacity})`,
+    }} />
+  ))
+}
+
+function SpindleHole() {
   return (
     <div style={{
-      width: '280px', height: '280px', borderRadius: '50%',
+      ...centered,
+      width: '14px', height: '14px', borderRadius: '50%',
+      background: '#000', zIndex: 2,
+    }} />
+  )
+}
+
+function VinylDisc({ glow, children }) {
+  return (
+    <div style={{
+      width: VINYL_SIZE, height: VINYL_SIZE, borderRadius: '50%',
       background: 'radial-gradient(circle at 40% 38%, #140826, #000)',
       position: 'relative', overflow: 'hidden',
-      boxShadow: '0 8px 50px rgba(91,35,186,0.35), 0 24px 60px rgba(0,0,0,0.9)',
+      boxShadow: `0 8px 50px rgba(91,35,186,${glow}), 0 24px 60px rgba(0,0,0,0.9)`,
     }}>
-      {[52, 84, 112, 132].map(r => (
-        <div key={r} style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: `${r * 2}px`, height: `${r * 2}px`,
-          borderRadius: '50%', border: '1px solid rgba(255,255,255,0.045)',
-        }} />
-      ))}
+      {children}
+      <SpindleHole />
+    </div>
+  )
+}
+
+function MysteryVinyl() {
+  return (
+    <VinylDisc glow={0.35}>
+      <VinylGrooves opacity={0.045} />
       <div style={{
         position: 'absolute', inset: 0, borderRadius: '50%',
         background: 'conic-gradient(from 0deg, transparent 15%, rgba(139,92,246,0.14) 30%, rgba(96,165,250,0.09) 48%, rgba(167,243,208,0.07) 66%, rgba(251,191,36,0.05) 80%, transparent 92%)',
         animation: 'sheen-rotate 7s linear infinite',
       }} />
       <div style={{
-        position: 'absolute', top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
+        ...centered,
         width: '108px', height: '108px', borderRadius: '50%',
         overflow: 'hidden',
         background: 'radial-gradient(circle, #3b1a6a 0%, #1a0830 65%, #0a0515 100%)',
@@ -51,47 +67,22 @@ function MysteryVinyl() {
           animation: 'sheen-rotate 4s linear infinite',
         }} />
       </div>
-      <div style={{
-        position: 'absolute', top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: '14px', height: '14px', borderRadius: '50%',
-        background: '#000', zIndex: 2,
-      }} />
-    </div>
+    </VinylDisc>
   )
 }
 
 function AlbumVinyl({ image }) {
   return (
-    <div style={{
-      width: '280px', height: '280px', borderRadius: '50%',
-      background: 'radial-gradient(circle at 40% 38%, #140826, #000)',
-      position: 'relative', overflow: 'hidden',
-      boxShadow: '0 8px 50px rgba(91,35,186,0.3), 0 24px 60px rgba(0,0,0,0.9)',
-    }}>
-      {[52, 84, 112, 132].map(r => (
-        <div key={r} style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: `${r * 2}px`, height: `${r * 2}px`,
-          borderRadius: '50%', border: '1px solid rgba(255,255,255,0.05)',
-        }} />
-      ))}
+    <VinylDisc glow={0.3}>
+      <VinylGrooves opacity={0.05} />
       <div style={{
-        position: 'absolute', top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
+        ...centered,
         width: '108px', height: '108px', borderRadius: '50%',
         overflow: 'hidden', background: '#1a0a3a', zIndex: 1,
       }}>
         {image && <img src={image} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
       </div>
-      <div style={{
-        position: 'absolute', top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: '14px', height: '14px', borderRadius: '50%',
-        background: '#000', zIndex: 2,
-      }} />
-    </div>
+    </VinylDisc>
   )
 }
 
@@ -144,7 +135,6 @@ function FeelTab() {
   const [error, setError] = useState('')
   const [suggestions, setSuggestions] = useState([])
   const [showDrop, setShowDrop] = useState(false)
-  const inputRef = useRef(null)
   const debounceRef = useRef(null)
 
   // Fetch autocomplete suggestions as user types
@@ -155,7 +145,7 @@ function FeelTab() {
     if (val.trim().length < 2) { setSuggestions([]); setShowDrop(false); return }
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/search-tracks?q=${encodeURIComponent(val.trim())}`, { credentials: 'include' })
+        const res = await apiFetch(`/search-tracks?q=${encodeURIComponent(val.trim())}`)
         const data = await res.json()
         setSuggestions(data.tracks || [])
         setShowDrop((data.tracks || []).length > 0)
@@ -176,7 +166,7 @@ function FeelTab() {
     setError('')
     setResults(null)
     try {
-      const res = await apiFetch(`/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`, { credentials: 'include' })
+      const res = await apiFetch(`/feel?song=${encodeURIComponent(song)}&artist=${encodeURIComponent(artist)}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Not found')
       setResults(data)
@@ -218,7 +208,6 @@ function FeelTab() {
       <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '8px', position: 'relative' }}>
         <div style={{ flex: 1, position: 'relative' }}>
           <input
-            ref={inputRef}
             value={query}
             onChange={handleInputChange}
             onBlur={() => setTimeout(() => setShowDrop(false), 150)}
@@ -367,20 +356,24 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
     setLoadingNext(false)
   }
 
-  function handleRate(type) {
-    if (rating === type) return  // already rated this
-    setRating(type)
-    apiFetch(`/signal`, {
+  // Fire-and-forget — a dropped signal just means slightly weaker future picks
+  function sendSignal(signalType) {
+    apiFetch('/signal', {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         artist_name: rec.artist,
         album_name: rec.album_name,
         spotify_url: rec.spotify_url,
-        signal_type: type,  // 'liked' or 'disliked'
+        signal_type: signalType,
       }),
     }).catch(() => {})
+  }
+
+  function handleRate(type) {
+    if (rating === type) return  // already rated this
+    setRating(type)
+    sendSignal(type)
   }
 
   function handleTap() {
@@ -442,14 +435,14 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
 
         {/* Spinning */}
         {isSpinning && (
-          <div style={{ position: 'relative', width: '280px', height: '280px' }}>
+          <div style={{ position: 'relative', width: VINYL_SIZE, height: VINYL_SIZE }}>
             {/* Album art fades in underneath */}
             {phase === 'fading' && (
               <img
                 src={rec.image} alt={rec.album_name}
                 style={{
                   position: 'absolute', inset: 0,
-                  width: '280px', height: '280px',
+                  width: VINYL_SIZE, height: VINYL_SIZE,
                   borderRadius: '16px', objectFit: 'cover',
                   boxShadow: '0 0 70px rgba(91,35,186,0.55), 0 28px 70px rgba(0,0,0,0.9)',
                   animation: 'art-fade-in 0.9s ease forwards',
@@ -476,7 +469,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
               <img
                 src={rec.image} alt={rec.album_name}
                 style={{
-                  width: '280px', height: '280px', borderRadius: '16px',
+                  width: VINYL_SIZE, height: VINYL_SIZE, borderRadius: '16px',
                   objectFit: 'cover', display: 'block',
                   boxShadow: '0 0 80px rgba(91,35,186,0.6), 0 30px 80px rgba(0,0,0,0.9)',
                 }}
@@ -493,19 +486,7 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
                 href={rec.spotify_url}
                 target="_blank"
                 rel="noreferrer"
-                onClick={() => {
-                  apiFetch(`/signal`, {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      artist_name: rec.artist,
-                      album_name: rec.album_name,
-                      spotify_url: rec.spotify_url,
-                      signal_type: 'clicked_spotify',
-                    }),
-                  }).catch(() => {})
-                }}
+                onClick={() => sendSignal('clicked_spotify')}
                 style={{
                   display: 'inline-block', color: '#fff',
                   fontSize: '13px', fontWeight: '600', letterSpacing: '0.5px',
@@ -575,161 +556,14 @@ function NudgeTab({ rec, skipsRemaining, onHeardIt }) {
   )
 }
 
-// ─── Friends tab ─────────────────────────────────────────────────────────────
-
-const EMOJIS = ['🔥', '👀', '❤️']
-
-function FriendCard({ friend, onReact }) {
-  const [reacting, setReacting] = useState(false)
-
-  async function handleReact(emoji) {
-    if (reacting) return
-    setReacting(true)
-    await onReact(friend.user_id, emoji)
-    setReacting(false)
-  }
-
-  // Count reactions by emoji
-  const counts = {}
-  for (const r of friend.reactions) {
-    counts[r.emoji] = (counts[r.emoji] || 0) + 1
-  }
-
-  return (
-    <div style={{
-      background: 'rgba(255,255,255,0.04)',
-      border: '1px solid rgba(255,255,255,0.08)',
-      borderRadius: '20px', padding: '16px',
-      display: 'flex', flexDirection: 'column', gap: '14px',
-    }}>
-      {/* Friend name */}
-      <p style={{ fontSize: '13px', fontWeight: '600', color: 'rgba(255,255,255,0.5)', letterSpacing: '0.3px' }}>
-        {friend.display_name}
-      </p>
-
-      {friend.nudge ? (
-        <>
-          {/* Album */}
-          <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
-            {friend.nudge.image && (
-              <img src={friend.nudge.image} alt="" style={{ width: '64px', height: '64px', borderRadius: '10px', flexShrink: 0, objectFit: 'cover' }} />
-            )}
-            <div style={{ minWidth: 0 }}>
-              <p style={{ fontSize: '15px', fontWeight: '600', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {friend.nudge.album_name}
-              </p>
-              <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)', marginTop: '3px' }}>
-                {friend.nudge.artist}
-              </p>
-            </div>
-          </div>
-
-          {/* Reactions row */}
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            {EMOJIS.map(emoji => {
-              const isMe = friend.my_reaction === emoji
-              const count = counts[emoji] || 0
-              return (
-                <button
-                  key={emoji}
-                  onClick={() => handleReact(emoji)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '5px',
-                    background: isMe ? 'rgba(91,35,186,0.3)' : 'rgba(255,255,255,0.06)',
-                    border: `1px solid ${isMe ? 'rgba(91,35,186,0.6)' : 'rgba(255,255,255,0.1)'}`,
-                    borderRadius: '100px', padding: '6px 12px',
-                    fontSize: '16px', cursor: 'pointer',
-                    color: '#fff', transition: 'all 0.15s',
-                    opacity: friend.my_reaction && !isMe ? 0.4 : 1,
-                  }}
-                >
-                  {emoji}
-                  {count > 0 && (
-                    <span style={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>{count}</span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        </>
-      ) : (
-        <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.2)' }}>No nudge yet today</p>
-      )}
-    </div>
-  )
-}
-
-function FriendsTab() {
-  const [friends, setFriends] = useState(null)
-  const [inviteLink, setInviteLink] = useState('')
-  const [copied, setCopied] = useState(false)
-
-  useEffect(() => {
-    apiFetch(`/friends`, { credentials: 'include' }).then(r => r.json()).then(d => setFriends(d.friends || []))
-    apiFetch(`/invite-link`, { credentials: 'include' }).then(r => r.json()).then(d => setInviteLink(d.link || ''))
-  }, [])
-
-  async function handleReact(friendId, emoji) {
-    await apiFetch(`/react`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ friend_id: friendId, emoji }),
-    })
-    // Refresh friends list to get updated reaction counts
-    const updated = await apiFetch(`/friends`, { credentials: 'include' }).then(r => r.json())
-    setFriends(updated.friends || [])
-  }
-
-  function copyInvite() {
-    navigator.clipboard.writeText(inviteLink).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-
-  return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '24px 20px 32px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {/* Invite button */}
-      <button
-        onClick={copyInvite}
-        style={{
-          width: '100%', padding: '14px',
-          background: copied ? 'rgba(91,35,186,0.25)' : 'rgba(91,35,186,0.15)',
-          border: '1px solid rgba(91,35,186,0.4)',
-          borderRadius: '16px', color: '#fff',
-          fontSize: '14px', fontWeight: '600', cursor: 'pointer',
-          transition: 'all 0.2s',
-        }}
-      >
-        {copied ? '✓ Link copied!' : '+ Invite a friend'}
-      </button>
-
-      {/* Friends list */}
-      {friends === null && (
-        <p style={{ color: 'rgba(255,255,255,0.2)', fontSize: '13px', textAlign: 'center', marginTop: '24px' }}>Loading...</p>
-      )}
-      {friends?.length === 0 && (
-        <div style={{ textAlign: 'center', marginTop: '40px' }}>
-          <p style={{ fontSize: '15px', color: 'rgba(255,255,255,0.5)' }}>No friends yet</p>
-          <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.25)', marginTop: '8px' }}>Share your invite link to get started</p>
-        </div>
-      )}
-      {friends?.map(f => (
-        <FriendCard key={f.user_id} friend={f} onReact={handleReact} />
-      ))}
-    </div>
-  )
-}
-
 // ─── Tab bar ─────────────────────────────────────────────────────────────────
 
+const TABS = [
+  { id: 'nudge', label: 'nudge', title: "Today's Nudge" },
+  { id: 'feel',  label: 'feel',  title: 'Discover' },
+]
+
 function TabBar({ tab, setTab }) {
-  const tabs = [
-    { id: 'friends', label: 'friends' },
-    { id: 'nudge',   label: 'nudge'   },
-    { id: 'feel',    label: 'feel'    },
-  ]
   return (
     <div style={{
       display: 'flex',
@@ -739,7 +573,7 @@ function TabBar({ tab, setTab }) {
       WebkitBackdropFilter: 'blur(20px)',
       paddingBottom: 'env(safe-area-inset-bottom, 20px)',
     }}>
-      {tabs.map(t => (
+      {TABS.map(t => (
         <button
           key={t.id}
           onClick={() => setTab(t.id)}
@@ -771,8 +605,22 @@ function TabBar({ tab, setTab }) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+// Every tab stays mounted so its state survives switching away and back.
+// minHeight:0 is the flex trick that lets the inner scroll containers work.
+function TabPanel({ active, children }) {
+  return (
+    <div style={{
+      display: active ? 'flex' : 'none',
+      flex: 1, flexDirection: 'column', width: '100%', minHeight: 0,
+    }}>
+      {children}
+    </div>
+  )
+}
+
 export default function HomePage({ rec, skipsRemaining, onHeardIt }) {
   const [tab, setTab] = useState('nudge')
+  const title = TABS.find(t => t.id === tab)?.title
 
   return (
     <div style={{
@@ -785,26 +633,20 @@ export default function HomePage({ rec, skipsRemaining, onHeardIt }) {
         animation: 'fade-in 0.6s ease', flexShrink: 0,
       }}>
         <p style={{ color: 'rgba(255,255,255,0.3)', fontSize: '12px', letterSpacing: '2px', textTransform: 'uppercase' }}>
-          {tab === 'nudge' ? "Today's Nudge" : tab === 'feel' ? 'Discover' : 'Friends'}
+          {title}
         </p>
         <h1 style={{ fontSize: '28px', fontWeight: '700', letterSpacing: '-1px', marginTop: '4px' }}>
           nudge
         </h1>
       </div>
 
-      {/* Tab content — all stay mounted so state persists across tab switches */}
-      {/* minHeight:0 is the CSS flex trick that lets inner overflow/scroll work correctly */}
-      <div style={{ display: tab === 'nudge' ? 'flex' : 'none', flex: 1, flexDirection: 'column', width: '100%', minHeight: 0 }}>
+      <TabPanel active={tab === 'nudge'}>
         <NudgeTab rec={rec} skipsRemaining={skipsRemaining} onHeardIt={onHeardIt} />
-      </div>
-      <div style={{ display: tab === 'feel' ? 'flex' : 'none', flex: 1, flexDirection: 'column', width: '100%', minHeight: 0 }}>
+      </TabPanel>
+      <TabPanel active={tab === 'feel'}>
         <FeelTab />
-      </div>
-      <div style={{ display: tab === 'friends' ? 'flex' : 'none', flex: 1, flexDirection: 'column', width: '100%', minHeight: 0 }}>
-        <FriendsTab />
-      </div>
+      </TabPanel>
 
-      {/* Tab bar */}
       <TabBar tab={tab} setTab={setTab} />
     </div>
   )

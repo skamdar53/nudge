@@ -1,18 +1,5 @@
 import { useState } from 'react'
-
-const API = import.meta.env.VITE_API_URL || '/api'
-
-function apiFetch(path, options = {}) {
-  const uid = localStorage.getItem('nudge_uid')
-  return fetch(`${API}${path}`, {
-    credentials: 'include',
-    ...options,
-    headers: {
-      ...(uid ? { 'X-Nudge-UID': uid } : {}),
-      ...(options.headers || {}),
-    },
-  })
-}
+import { apiFetch } from '../api'
 
 const GENRES = [
   'hip-hop', 'rap', 'r&b', 'soul', 'jazz', 'blues',
@@ -22,7 +9,9 @@ const GENRES = [
   'afrobeats', 'lo-fi', 'experimental',
 ]
 
-function GenreGrid({ selected, onToggle, color }) {
+const ACCENT = '#5b23ba'
+
+function GenreGrid({ selected, onToggle }) {
   return (
     <div style={{
       display: 'flex',
@@ -40,14 +29,14 @@ function GenreGrid({ selected, onToggle, color }) {
             style={{
               padding: '8px 18px',
               borderRadius: '100px',
-              border: active ? `1.5px solid ${color}` : '1.5px solid rgba(255,255,255,0.15)',
-              background: active ? `rgba(91, 35, 186, 0.25)` : 'rgba(255,255,255,0.05)',
+              border: `1.5px solid ${active ? ACCENT : 'rgba(255,255,255,0.15)'}`,
+              background: active ? 'rgba(91, 35, 186, 0.25)' : 'rgba(255,255,255,0.05)',
               color: active ? '#fff' : 'rgba(255,255,255,0.5)',
               fontSize: '14px',
               fontWeight: active ? '600' : '400',
               cursor: 'pointer',
               transition: 'all 0.15s ease',
-              boxShadow: active ? `0 0 12px rgba(91, 35, 186, 0.4)` : 'none',
+              boxShadow: active ? '0 0 12px rgba(91, 35, 186, 0.4)' : 'none',
             }}
           >
             {genre}
@@ -64,7 +53,7 @@ export default function OnboardingPage({ onComplete }) {
   const [explore, setExplore] = useState([])
   const [saving, setSaving] = useState(false)
 
-  function toggle(list, setList, genre) {
+  function toggleGenre(setList, genre) {
     setList(prev => prev.includes(genre) ? prev.filter(g => g !== genre) : [...prev, genre])
   }
 
@@ -95,7 +84,7 @@ export default function OnboardingPage({ onComplete }) {
         {[1, 2].map(s => (
           <div key={s} style={{
             width: '24px', height: '3px', borderRadius: '2px',
-            background: s <= step ? '#5b23ba' : 'rgba(255,255,255,0.2)',
+            background: s <= step ? ACCENT : 'rgba(255,255,255,0.2)',
             transition: 'background 0.3s',
           }} />
         ))}
@@ -111,12 +100,12 @@ export default function OnboardingPage({ onComplete }) {
               Pick any genres you're into
             </p>
           </div>
-          <GenreGrid selected={liked} onToggle={g => toggle(liked, setLiked, g)} color="#5b23ba" />
+          <GenreGrid selected={liked} onToggle={g => toggleGenre(setLiked, g)} />
           <button
             onClick={() => setStep(2)}
             disabled={liked.length === 0}
             style={{
-              background: liked.length > 0 ? '#5b23ba' : 'rgba(255,255,255,0.1)',
+              background: liked.length > 0 ? ACCENT : 'rgba(255,255,255,0.1)',
               color: liked.length > 0 ? '#fff' : 'rgba(255,255,255,0.3)',
               border: 'none',
               borderRadius: '100px',
@@ -141,7 +130,7 @@ export default function OnboardingPage({ onComplete }) {
               We'll nudge you toward these occasionally
             </p>
           </div>
-          <GenreGrid selected={explore} onToggle={g => toggle(explore, setExplore, g)} color="#5b23ba" />
+          <GenreGrid selected={explore} onToggle={g => toggleGenre(setExplore, g)} />
           <div style={{ display: 'flex', gap: '12px' }}>
             <button
               onClick={() => setStep(1)}
@@ -161,7 +150,7 @@ export default function OnboardingPage({ onComplete }) {
               onClick={handleDone}
               disabled={saving}
               style={{
-                background: '#5b23ba',
+                background: ACCENT,
                 color: '#fff',
                 border: 'none',
                 borderRadius: '100px',

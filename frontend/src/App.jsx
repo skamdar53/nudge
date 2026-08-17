@@ -1,52 +1,17 @@
 import { useState, useEffect } from 'react'
+import { apiFetch } from './api'
 import LoginPage from './pages/LoginPage'
 import LoadingPage from './pages/LoadingPage'
 import OnboardingPage from './pages/OnboardingPage'
 import HomePage from './pages/HomePage'
 
-const API = import.meta.env.VITE_API_URL || '/api'
-
-// Attaches stored uid as a header on every request (needed for iOS Safari
-// which blocks third-party cookies set via Vercel → Railway redirects)
-function apiFetch(path, options = {}) {
-  const uid = localStorage.getItem('nudge_uid')
-  return fetch(`${API}${path}`, {
-    credentials: 'include',
-    ...options,
-    headers: {
-      ...(uid ? { 'X-Nudge-UID': uid } : {}),
-      ...(options.headers || {}),
-    },
-  })
-}
+const POOL_POLL_MS = 3000
 
 export default function App() {
   // 'init' while we check the session — prevents login page flashing
   const [screen, setScreen] = useState('init')
   const [rec, setRec] = useState(null)
   const [skipsRemaining, setSkipsRemaining] = useState(3)
-
-  useEffect(() => {
-    // Grab uid from URL if redirected back from Spotify OAuth
-    const params = new URLSearchParams(window.location.search)
-    const uid = params.get('uid')
-    if (uid) {
-      localStorage.setItem('nudge_uid', uid)
-      window.history.replaceState({}, '', window.location.pathname)
-    }
-    checkSession()
-  }, [])
-
-  async function handleInviteParam() {
-    const params = new URLSearchParams(window.location.search)
-    const code = params.get('invite') || localStorage.getItem('pending_invite')
-    if (!code) return
-    window.history.replaceState({}, '', window.location.pathname)
-    localStorage.removeItem('pending_invite')
-    try {
-      await apiFetch(`/accept-invite?code=${encodeURIComponent(code)}`, { method: 'POST' })
-    } catch {}
-  }
 
   async function checkSession() {
     try {
@@ -57,32 +22,31 @@ export default function App() {
         await loadToday()
       } else {
         setScreen('loading')
-        pollPool()
+        pollPoolUntilReady(loadToday)
       }
     } catch {
       setScreen('login')
     }
   }
 
-  function pollPool() {
+  // The pool is built in a background thread on the server, so we wait it out
+  function pollPoolUntilReady(onReady) {
     const interval = setInterval(async () => {
       try {
         const res = await apiFetch('/pool-status')
         const data = await res.json()
         if (data.ready) {
           clearInterval(interval)
-          await loadToday()
+          await onReady()
         }
       } catch {
         clearInterval(interval)
         setScreen('login')
       }
-    }, 3000)
+    }, POOL_POLL_MS)
   }
 
   async function loadToday() {
-    await handleInviteParam()
-
     const res = await apiFetch('/today')
     const data = await res.json()
     setRec(data.todays_nudge)
@@ -101,23 +65,13 @@ export default function App() {
     // Rebuild the pool now that genre preferences are saved, then get a fresh rec
     await apiFetch('/rebuild-pool', { method: 'POST' })
     setScreen('loading')
-    const interval = setInterval(async () => {
-      try {
-        const res = await apiFetch('/pool-status')
-        const data = await res.json()
-        if (data.ready) {
-          clearInterval(interval)
-          const res2 = await apiFetch('/today?force=true')
-          const data2 = await res2.json()
-          setRec(data2.todays_nudge)
-          setSkipsRemaining(data2.skips_remaining)
-          setScreen('home')
-        }
-      } catch {
-        clearInterval(interval)
-        setScreen('login')
-      }
-    }, 3000)
+    pollPoolUntilReady(async () => {
+      const res = await apiFetch('/today?force=true')
+      const data = await res.json()
+      setRec(data.todays_nudge)
+      setSkipsRemaining(data.skips_remaining)
+      setScreen('home')
+    })
   }
 
   async function handleHeardIt() {
@@ -131,10 +85,27 @@ export default function App() {
     }
   }
 
-  if (screen === 'init') return null  // blank while session check runs
-  if (screen === 'login') return <LoginPage />
-  if (screen === 'loading') return <LoadingPage />
-  if (screen === 'onboarding') return <OnboardingPage onComplete={() => onboardingComplete()} />
-  if (screen === 'home') return <HomePage rec={rec} skipsRemaining={skipsRemaining} onHeardIt={handleHeardIt} />
-  return null
+  useEffect(() => {
+    // Grab uid from URL if redirected back from Spotify OAuth
+    const params = new URLSearchParams(window.location.search)
+    const uid = params.get('uid')
+    if (uid) {
+      localStorage.setItem('nudge_uid', uid)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+    checkSession()
+  }, [])
+
+  switch (screen) {
+    case 'login':
+      return <LoginPage />
+    case 'loading':
+      return <LoadingPage />
+    case 'onboarding':
+      return <OnboardingPage onComplete={onboardingComplete} />
+    case 'home':
+      return <HomePage rec={rec} skipsRemaining={skipsRemaining} onHeardIt={handleHeardIt} />
+    default:
+      return null  // 'init' — blank while the session check runs
+  }
 }

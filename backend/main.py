@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Cookie, Response, Depends, Header
+from fastapi import FastAPI, HTTPException, Cookie, Depends, Header
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,8 +12,6 @@ import os
 import random
 import time
 import threading
-import uuid
-import json
 from datetime import date, datetime, timedelta, timezone
 
 load_dotenv()
@@ -31,12 +29,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-scope = "user-top-read user-library-read playlist-read-private user-read-recently-played"
+SPOTIFY_SCOPE = "user-top-read user-library-read playlist-read-private user-read-recently-played"
 MAX_HEARD_IT_SKIPS = 3
 POOL_REFRESH_DAYS = 7
+MAX_ALBUMS_PER_ARTIST = 2
+EXPLORE_GENRE_CHANCE = 0.40
 
 sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 
 # --- Supabase token cache (survives Railway restarts) ---
@@ -70,23 +74,35 @@ class SupabaseCacheHandler(CacheHandler):
 
 # --- Spotify helpers ---
 
-def get_spotify_oauth(user_id: str):
+def build_spotify_oauth(cache_handler):
     return SpotifyOAuth(
-        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
-        redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
-        scope=scope,
-        cache_handler=SupabaseCacheHandler(user_id),
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope=SPOTIFY_SCOPE,
+        cache_handler=cache_handler,
     )
 
-def get_spotify_client(user_id: str):
-    sp_oauth = get_spotify_oauth(user_id)
+def get_spotify_token(user_id: str) -> dict:
     # get_cached_token validates and auto-refreshes (saving new token via cache_handler)
-    token_info = sp_oauth.get_cached_token()
+    token_info = build_spotify_oauth(SupabaseCacheHandler(user_id)).get_cached_token()
     if not token_info:
         raise HTTPException(status_code=401, detail="Not logged in. Visit /login first.")
+    return token_info
+
+def build_spotify_client(access_token: str):
     # retries=0 so rate limits fail fast instead of waiting hours to retry
-    return spotipy.Spotify(auth=token_info["access_token"], retries=0, requests_timeout=10)
+    return spotipy.Spotify(auth=access_token, retries=0, requests_timeout=10)
+
+def get_spotify_client(user_id: str):
+    return build_spotify_client(get_spotify_token(user_id)["access_token"])
+
+def start_pool_build(user_id: str, access_token: str) -> None:
+    threading.Thread(
+        target=build_artist_pool,
+        args=(user_id, access_token),
+        daemon=True,
+    ).start()
 
 def get_user_id(nudge_uid: str = Cookie(None), x_nudge_uid: str = Header(None)) -> str:
     """FastAPI dependency: extracts user's Spotify ID from cookie or X-Nudge-UID header."""
@@ -146,14 +162,12 @@ def audio_rerank(sp, candidates: list, user_profile: dict) -> list:
         features_list = sp.audio_features(valid_ids)
         feat_map = {f['id']: f for f in features_list if f}
 
-        valid_idx = 0
         for i, c in enumerate(top):
             tid = track_ids[i]
             if tid and tid in feat_map:
                 sim = audio_similarity(feat_map[tid], user_profile)
                 # 65% artist/popularity signal, 35% timbre match
                 c['score'] = c['score'] * 0.65 + sim * 100 * 0.35
-                valid_idx += 1
 
         # Re-sort after rescoring; remaining candidates keep original order
         top.sort(key=lambda x: x['score'], reverse=True)
@@ -165,11 +179,21 @@ def audio_rerank(sp, candidates: list, user_profile: dict) -> list:
 
 # --- Artist pool ---
 
+def search_artist(sp, name: str) -> dict | None:
+    """Resolve an artist name to a Spotify artist object, or None if unavailable."""
+    try:
+        results = sp.search(q=f"artist:{name}", type="artist", limit=1)
+        items = results["artists"]["items"]
+        return items[0] if items else None
+    except Exception:
+        return None
+
+
 def build_artist_pool(user_id: str, token: str):
     """
-    Runs in a background thread on login.
-    Also tries to build the user's sound profile from audio features.
-    Rebuilds the pool only if older than POOL_REFRESH_DAYS.
+    Runs in a background thread on login. Builds the user's sound profile,
+    the similar-artist pool, and the album cache that pick_album reads from.
+    Rebuilds only if the existing pool is older than POOL_REFRESH_DAYS.
     """
     try:
         existing = sb.table("artist_pool").select("created_at") \
@@ -182,19 +206,25 @@ def build_artist_pool(user_id: str, token: str):
             if age_days < POOL_REFRESH_DAYS:
                 return
 
-        sp = spotipy.Spotify(auth=token, retries=0, requests_timeout=10)
+        sp = build_spotify_client(token)
         top_artists = sp.current_user_top_artists(limit=10, time_range="medium_term")
         top_artist_names = [a["name"] for a in top_artists["items"]]
-        top_artist_ids = set(a["id"] for a in top_artists["items"])
+        top_artist_ids = {a["id"] for a in top_artists["items"]}
 
-        # --- Try to build audio fingerprint ---
+        # --- Try to build audio fingerprint + cache top-track album URLs ---
         try:
-            top_tracks = sp.current_user_top_tracks(limit=20, time_range="medium_term")
+            top_tracks = sp.current_user_top_tracks(limit=50, time_range="medium_term")
             track_ids = [t["id"] for t in top_tracks["items"]]
+            top_track_urls = [t["album"]["external_urls"]["spotify"] for t in top_tracks["items"]]
             profile = build_sound_profile(sp, track_ids)
+            update_payload: dict = {
+                "top_track_urls": top_track_urls,
+                "top_tracks_cached_at": datetime.now(timezone.utc).isoformat(),
+            }
             if profile:
-                sb.table("users").update({"sound_profile": profile}).eq("id", user_id).execute()
+                update_payload["sound_profile"] = profile
                 print(f"Sound profile built for {user_id}: {profile}")
+            sb.table("users").update(update_payload).eq("id", user_id).execute()
         except Exception as e:
             print(f"Sound profile skipped: {e}")
 
@@ -212,24 +242,19 @@ def build_artist_pool(user_id: str, token: str):
                 except Exception:
                     continue
                 for name, score in tag_artists[:6]:
-                    try:
-                        results = sp.search(q=f"artist:{name}", type="artist", limit=1)
-                        if not results["artists"]["items"]:
-                            continue
-                        artist = results["artists"]["items"][0]
-                        if artist["id"] in top_artist_ids or artist["id"] in seen_spotify_ids:
-                            continue
-                        seen_spotify_ids.add(artist["id"])
-                        rows.append({
-                            "user_id": user_id,
-                            "artist_name": artist["name"],
-                            "spotify_id": artist["id"],
-                            "popularity": artist.get("popularity", 50),
-                            "similarity_score": score * 0.7,
-                            "source_artist": f"genre:{genre}",
-                        })
-                    except Exception:
+                    artist = search_artist(sp, name)
+                    if not artist or artist["id"] in top_artist_ids or artist["id"] in seen_spotify_ids:
                         continue
+                    seen_spotify_ids.add(artist["id"])
+                    rows.append({
+                        "user_id": user_id,
+                        "artist_name": artist["name"],
+                        "spotify_id": artist["id"],
+                        "popularity": artist.get("popularity", 50),
+                        # Genre seeds are a weaker signal than Last.fm artist similarity
+                        "similarity_score": score * 0.7,
+                        "source_artist": f"genre:{genre}",
+                    })
         except Exception:
             pass
 
@@ -245,37 +270,61 @@ def build_artist_pool(user_id: str, token: str):
                 continue
 
             for sim_name, score in similar:
-                try:
-                    time.sleep(0.15)
-                    results = sp.search(q=f"artist:{sim_name}", type="artist", limit=1)
-                    if not results["artists"]["items"]:
-                        continue
-                    artist = results["artists"]["items"][0]
-                    if artist["id"] in top_artist_ids or artist["id"] in seen_spotify_ids:
-                        continue
-                    seen_spotify_ids.add(artist["id"])
-                    rows.append({
-                        "user_id": user_id,
-                        "artist_name": artist["name"],
-                        "spotify_id": artist["id"],
-                        "popularity": artist.get("popularity", 50),
-                        "similarity_score": score,
-                        "source_artist": source_artist,
-                    })
-                except Exception:
+                time.sleep(0.15)
+                artist = search_artist(sp, sim_name)
+                if not artist or artist["id"] in top_artist_ids or artist["id"] in seen_spotify_ids:
                     continue
+                seen_spotify_ids.add(artist["id"])
+                rows.append({
+                    "user_id": user_id,
+                    "artist_name": artist["name"],
+                    "spotify_id": artist["id"],
+                    "popularity": artist.get("popularity", 50),
+                    "similarity_score": score,
+                    "source_artist": source_artist,
+                })
 
         if rows:
             sb.table("artist_pool").delete().eq("user_id", user_id).execute()
             sb.table("artist_pool").insert(rows).execute()
 
+        # --- Pre-fetch and cache albums for every artist in the pool ---
+        # rows is empty when Last.fm gave us nothing new — fall back to the stored pool
+        pool_artists = rows
+        if not pool_artists:
+            existing_pool = sb.table("artist_pool").select("spotify_id, artist_name") \
+                .eq("user_id", user_id).execute()
+            pool_artists = existing_pool.data
+
+        album_rows = []
+        seen_album_urls: set[str] = set()
+        for artist_row in pool_artists:
+            try:
+                time.sleep(0.1)
+                albums = sp.artist_albums(artist_row["spotify_id"], album_type="album", limit=5)
+                for album in albums["items"]:
+                    url = album["external_urls"]["spotify"]
+                    if url in seen_album_urls:
+                        continue
+                    seen_album_urls.add(url)
+                    album_rows.append({
+                        "user_id": user_id,
+                        "artist_spotify_id": artist_row["spotify_id"],
+                        "artist_name": artist_row["artist_name"],
+                        "album_name": album["name"],
+                        "spotify_url": url,
+                        "image_url": album["images"][0]["url"] if album["images"] else None,
+                    })
+            except Exception:
+                continue
+
+        if album_rows:
+            sb.table("album_pool").delete().eq("user_id", user_id).execute()
+            sb.table("album_pool").insert(album_rows).execute()
+            print(f"album_pool: cached {len(album_rows)} albums for {user_id}")
+
     except Exception as e:
         print(f"build_artist_pool error: {e}")
-
-
-def pool_is_ready(user_id: str) -> bool:
-    result = sb.table("artist_pool").select("id").eq("user_id", user_id).limit(1).execute()
-    return bool(result.data)
 
 
 # --- Recommendation ---
@@ -296,19 +345,21 @@ def weighted_popularity_pick(candidates: list) -> dict:
     return random.choices(pool, weights=weights, k=1)[0]
 
 
+SIGNAL_WEIGHTS = {
+    "liked": 3.0,
+    "listened": 2.5,
+    "clicked_spotify": 1.8,
+    "disliked": 0.4,
+}
+SIGNAL_DECAY_DAYS = 90
+
+
 def get_signal_boosts(user_id: str) -> dict:
     """
     Returns a dict of artist_name (lowercase) → boost multiplier.
-    Positive: liked (3×), listened (2.5×), clicked_spotify (1.8×)
-    Negative: disliked (0.4×)
-    All signals decay toward 1.0 over 90 days.
+    Weights above 1.0 favour the artist, below 1.0 suppress them, and every
+    signal decays toward a neutral 1.0 over SIGNAL_DECAY_DAYS.
     """
-    BASE = {
-        "liked": 3.0,
-        "listened": 2.5,
-        "clicked_spotify": 1.8,
-        "disliked": 0.4,
-    }
     try:
         data = sb.table("signals").select("artist_name, signal_type, created_at") \
             .eq("user_id", user_id).execute()
@@ -316,14 +367,14 @@ def get_signal_boosts(user_id: str) -> dict:
         boosts = {}
         for sig in data.data:
             name = sig["artist_name"].lower()
-            base = BASE.get(sig["signal_type"])
+            base = SIGNAL_WEIGHTS.get(sig["signal_type"])
             if base is None:
                 continue
-            # Decay toward 1.0 over 90 days (retains at least 30% of effect)
+            # Retains at least 30% of the original effect no matter how old
             try:
                 created = datetime.fromisoformat(sig["created_at"].replace("Z", "+00:00"))
                 age_days = (now - created).days
-                decay = max(0.3, 1.0 - age_days / 90)
+                decay = max(0.3, 1.0 - age_days / SIGNAL_DECAY_DAYS)
             except Exception:
                 decay = 1.0
             decayed = 1.0 + (base - 1.0) * decay
@@ -337,88 +388,137 @@ def get_signal_boosts(user_id: str) -> dict:
         return {}
 
 
-def pick_album(user_id: str, genre_filter: str = None) -> dict:
-    sp = get_spotify_client(user_id)
-
-    # Exclusion list: top tracks + permanently heard albums
-    known_urls = set()
+def collect_known_urls(sp, user_id: str) -> set[str]:
+    """Albums to exclude: the user's top tracks, plus everything already marked as heard."""
+    known_urls: set[str] = set()
     try:
-        tracks = sp.current_user_top_tracks(limit=50, time_range="medium_term")
-        for t in tracks["items"]:
-            known_urls.add(t["album"]["external_urls"]["spotify"])
+        user_row = sb.table("users").select("top_track_urls").eq("id", user_id).execute()
+        cached_urls = user_row.data[0].get("top_track_urls") if user_row.data else None
+        if cached_urls:
+            known_urls.update(cached_urls)
+        else:
+            # Fallback for first-time users before pool build completes
+            tracks = sp.current_user_top_tracks(limit=50, time_range="medium_term")
+            known_urls.update(t["album"]["external_urls"]["spotify"] for t in tracks["items"])
     except Exception:
         pass
 
     heard = sb.table("heard_albums").select("spotify_url").eq("user_id", user_id).execute()
-    for r in heard.data:
-        known_urls.add(r["spotify_url"])
+    known_urls.update(r["spotify_url"] for r in heard.data)
+    return known_urls
 
-    # Get signal boosts (from clicks + confirmed listens)
-    boosts = get_signal_boosts(user_id)
 
-    # Build artist pool
-    if genre_filter:
-        try:
-            tag_artists = get_tag_top_artists(LASTFM_API_KEY, genre_filter, limit=20)
-        except RateLimitError:
-            raise HTTPException(status_code=503, detail="Music service busy. Try again in a few minutes.")
-        except Exception:
-            raise HTTPException(status_code=404, detail=f"Couldn't find artists for '{genre_filter}'.")
+def genre_artist_pool(sp, genre_filter: str, boosts: dict) -> list:
+    """Artists for a one-off genre request, resolved live from a Last.fm tag."""
+    try:
+        tag_artists = get_tag_top_artists(LASTFM_API_KEY, genre_filter, limit=20)
+    except RateLimitError:
+        raise HTTPException(status_code=503, detail="Music service busy. Try again in a few minutes.")
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Couldn't find artists for '{genre_filter}'.")
 
-        artist_pool = []
-        for name, score in tag_artists[:10]:
-            try:
-                results = sp.search(q=f"artist:{name}", type="artist", limit=1)
-                if results["artists"]["items"]:
-                    a = results["artists"]["items"][0]
-                    artist_pool.append({
-                        "spotify_id": a["id"],
-                        "artist_name": a["name"],
-                        "popularity": a.get("popularity", 50),
-                        "score": score * boosts.get(a["name"].lower(), 1.0)
-                    })
-            except Exception:
-                continue
-    else:
-        pool_data = sb.table("artist_pool").select("*").eq("user_id", user_id).execute()
-        if not pool_data.data:
-            raise HTTPException(status_code=503, detail="Your music profile is still loading. Try again in 30 seconds.")
-        random.shuffle(pool_data.data)
-        artist_pool = [{
-            "spotify_id": r["spotify_id"],
-            "artist_name": r["artist_name"],
-            "popularity": r["popularity"],
-            # Apply signal boost to base similarity score
-            "score": r["similarity_score"] * boosts.get(r["artist_name"].lower(), 1.0)
-        } for r in pool_data.data]
+    pool = []
+    for name, score in tag_artists[:10]:
+        artist = search_artist(sp, name)
+        if not artist:
+            continue
+        pool.append({
+            "spotify_id": artist["id"],
+            "artist_name": artist["name"],
+            "popularity": artist.get("popularity", 50),
+            "score": score * boosts.get(artist["name"].lower(), 1.0),
+        })
+    return pool
 
-    # Fetch albums from artists in pool — 1 album per artist to avoid same-artist streaks
+
+def stored_artist_pool(user_id: str, boosts: dict) -> list:
+    """The user's pre-built pool, shuffled so repeat picks don't follow the same order."""
+    pool_data = sb.table("artist_pool").select("*").eq("user_id", user_id).execute()
+    if not pool_data.data:
+        raise HTTPException(status_code=503, detail="Your music profile is still loading. Try again in 30 seconds.")
+    random.shuffle(pool_data.data)
+    return [{
+        "spotify_id": r["spotify_id"],
+        "artist_name": r["artist_name"],
+        "popularity": r["popularity"],
+        "score": r["similarity_score"] * boosts.get(r["artist_name"].lower(), 1.0),
+    } for r in pool_data.data]
+
+
+def candidates_from_spotify(sp, artist_pool: list, known_urls: set) -> list:
+    """Genre path: albums are fetched live, since these artists aren't in album_pool."""
     candidates = []
-    for artist in artist_pool[:20]:
+    for artist in artist_pool[:40]:
         try:
             albums = sp.artist_albums(artist["spotify_id"], album_type="album", limit=5)
+            added = 0
             for album in albums["items"]:
+                if added >= MAX_ALBUMS_PER_ARTIST:
+                    break
                 url = album["external_urls"]["spotify"]
-                if url not in known_urls:
-                    candidates.append({
-                        "album_name": album["name"],
-                        "artist": artist["artist_name"],
-                        "popularity": artist["popularity"],
-                        "score": artist["score"],
-                        "spotify_url": url,
-                        "image": album["images"][0]["url"] if album["images"] else None,
-                    })
-                    break  # one album per artist
+                if url in known_urls:
+                    continue
+                candidates.append({
+                    "album_name": album["name"],
+                    "artist": artist["artist_name"],
+                    "popularity": artist["popularity"],
+                    "score": artist["score"],
+                    "spotify_url": url,
+                    "image": album["images"][0]["url"] if album["images"] else None,
+                })
+                added += 1
         except Exception:
             continue
+    return candidates
+
+
+def candidates_from_cache(user_id: str, artist_pool: list, known_urls: set) -> list:
+    """Normal path: zero Spotify calls — albums come from the pre-built album_pool."""
+    artists_by_id = {a["spotify_id"]: a for a in artist_pool}
+    cached = sb.table("album_pool").select(
+        "artist_spotify_id, artist_name, album_name, spotify_url, image_url"
+    ).eq("user_id", user_id).execute()
+
+    candidates = []
+    per_artist_count: dict[str, int] = {}
+    for row in cached.data:
+        artist_id = row["artist_spotify_id"]
+        artist = artists_by_id.get(artist_id)
+        if not artist or row["spotify_url"] in known_urls:
+            continue
+        if per_artist_count.get(artist_id, 0) >= MAX_ALBUMS_PER_ARTIST:
+            continue
+        candidates.append({
+            "album_name": row["album_name"],
+            "artist": row["artist_name"],
+            "popularity": artist["popularity"],
+            "score": artist["score"],
+            "spotify_url": row["spotify_url"],
+            "image": row["image_url"],
+        })
+        per_artist_count[artist_id] = per_artist_count.get(artist_id, 0) + 1
+    return candidates
+
+
+def pick_album(user_id: str, genre_filter: str = None) -> dict:
+    sp = get_spotify_client(user_id)
+    known_urls = collect_known_urls(sp, user_id)
+    boosts = get_signal_boosts(user_id)
+
+    if genre_filter:
+        artist_pool = genre_artist_pool(sp, genre_filter, boosts)
+        candidates = candidates_from_spotify(sp, artist_pool, known_urls)
+    else:
+        artist_pool = stored_artist_pool(user_id, boosts)
+        candidates = candidates_from_cache(user_id, artist_pool, known_urls)
 
     if not candidates:
         raise HTTPException(status_code=404, detail="No new albums found. Try a genre filter.")
 
     # Try audio re-ranking if user has a sound profile
     try:
-        user_data = sb.table("users").select("sound_profile").eq("id", user_id).execute()
-        sound_profile = user_data.data[0].get("sound_profile") if user_data.data else None
+        profile_row = sb.table("users").select("sound_profile").eq("id", user_id).execute()
+        sound_profile = profile_row.data[0].get("sound_profile") if profile_row.data else None
         if sound_profile:
             candidates = audio_rerank(sp, candidates, sound_profile)
     except Exception as e:
@@ -439,10 +539,6 @@ class SignalRequest(BaseModel):
     spotify_url: str
     signal_type: str  # 'clicked_spotify' | 'liked' | 'disliked'
 
-class ReactionRequest(BaseModel):
-    friend_id: str
-    emoji: str  # '🔥' | '👀' | '❤️'
-
 
 # --- Routes ---
 
@@ -452,25 +548,13 @@ def root():
 
 @app.get("/login")
 def login():
-    oauth = SpotifyOAuth(
-        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
-        redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
-        scope=scope,
-        cache_handler=MemoryCacheHandler(),
-    )
+    oauth = build_spotify_oauth(MemoryCacheHandler())
     return RedirectResponse(oauth.get_authorize_url())
 
 @app.get("/callback")
 def callback(code: str):
     # Exchange auth code for tokens — MemoryCacheHandler prevents reading/writing .cache file
-    temp_oauth = SpotifyOAuth(
-        client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-        client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
-        redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI"),
-        scope=scope,
-        cache_handler=MemoryCacheHandler(),
-    )
+    temp_oauth = build_spotify_oauth(MemoryCacheHandler())
     token_info = temp_oauth.get_access_token(code)
     access_token = token_info["access_token"]
     sp = spotipy.Spotify(auth=access_token)
@@ -488,15 +572,9 @@ def callback(code: str):
             "onboarding_complete": False
         }).execute()
 
-    thread = threading.Thread(
-        target=build_artist_pool,
-        args=(user_id, access_token),
-        daemon=True
-    )
-    thread.start()
+    start_pool_build(user_id, access_token)
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-    response = RedirectResponse(f"{frontend_url}?uid={user_id}")
+    response = RedirectResponse(f"{FRONTEND_URL}?uid={user_id}")
     response.set_cookie(
         key="nudge_uid",
         value=user_id,
@@ -510,26 +588,17 @@ def callback(code: str):
 @app.post("/rebuild-pool")
 def rebuild_pool(user_id: str = Depends(get_user_id)):
     """Manually trigger a pool rebuild — useful after clearing the pool."""
-    sp = get_spotify_client(user_id)
-    token_info = get_spotify_oauth(user_id).get_cached_token()
+    token_info = get_spotify_token(user_id)
     # Force rebuild by clearing the existing pool first
     sb.table("artist_pool").delete().eq("user_id", user_id).execute()
-    thread = threading.Thread(
-        target=build_artist_pool,
-        args=(user_id, token_info["access_token"]),
-        daemon=True
-    )
-    thread.start()
+    start_pool_build(user_id, token_info["access_token"])
     return {"rebuilding": True}
 
 @app.get("/pool-status")
 def pool_status(user_id: str = Depends(get_user_id)):
-    ready = pool_is_ready(user_id)
-    count = 0
-    if ready:
-        r = sb.table("artist_pool").select("id", count="exact").eq("user_id", user_id).execute()
-        count = r.count or 0
-    return {"ready": ready, "artist_count": count}
+    result = sb.table("artist_pool").select("id", count="exact").eq("user_id", user_id).execute()
+    count = result.count or 0
+    return {"ready": count > 0, "artist_count": count}
 
 @app.post("/preferences")
 def save_preferences(prefs: PreferencesRequest, user_id: str = Depends(get_user_id)):
@@ -566,9 +635,9 @@ def get_today(genre_filter: str = None, force: bool = False, user_id: str = Depe
 
     if not genre_filter:
         prefs = sb.table("preferences").select("explore_genres").eq("user_id", user_id).execute()
-        if prefs.data and prefs.data[0]["explore_genres"]:
-            if random.random() < 0.40:
-                genre_filter = random.choice(prefs.data[0]["explore_genres"])
+        explore_genres = prefs.data[0]["explore_genres"] if prefs.data else None
+        if explore_genres and random.random() < EXPLORE_GENRE_CHANCE:
+            genre_filter = random.choice(explore_genres)
 
     pick = pick_album(user_id, genre_filter)
 
@@ -655,6 +724,17 @@ def record_signal(req: SignalRequest, user_id: str = Depends(get_user_id)):
         }).execute()
     return {"recorded": True}
 
+def summarize_track(track: dict) -> dict:
+    images = track["album"]["images"]
+    return {
+        "name": track["name"],
+        "artist": track["artists"][0]["name"],
+        "spotify_url": track["external_urls"]["spotify"],
+        "image": images[0]["url"] if images else None,
+        "popularity": track.get("popularity", 50),
+    }
+
+
 @app.get("/feel")
 def feel_search(song: str, artist: str = "", user_id: str = Depends(get_user_id)):
     """
@@ -687,13 +767,7 @@ def feel_search(song: str, artist: str = "", user_id: str = Depends(get_user_id)
             url = t["external_urls"]["spotify"]
             if url not in seen_urls:
                 seen_urls.add(url)
-                similar.append({
-                    "name": t["name"],
-                    "artist": t["artists"][0]["name"],
-                    "spotify_url": url,
-                    "image": t["album"]["images"][0]["url"] if t["album"]["images"] else None,
-                    "popularity": t.get("popularity", 50),
-                })
+                similar.append(summarize_track(t))
     except Exception as e:
         print(f"Spotify recommendations failed: {e}")
 
@@ -711,13 +785,7 @@ def feel_search(song: str, artist: str = "", user_id: str = Depends(get_user_id)
                 url = t["external_urls"]["spotify"]
                 if url not in seen_urls:
                     seen_urls.add(url)
-                    similar.append({
-                        "name": t["name"],
-                        "artist": t["artists"][0]["name"],
-                        "spotify_url": url,
-                        "image": t["album"]["images"][0]["url"] if t["album"]["images"] else None,
-                        "popularity": t.get("popularity", 50),
-                    })
+                    similar.append(summarize_track(t))
             except Exception:
                 continue
     except Exception as e:
@@ -780,7 +848,7 @@ def check_listened(user_id: str = Depends(get_user_id)):
         return {"checked": True, "listened": False}
     except Exception as e:
         print(f"recently_played check failed: {e}")
-        return {"checked": True, "error": str(e)}
+        return {"checked": True, "listened": False}
 
 
 @app.get("/search-tracks")
@@ -796,118 +864,14 @@ def search_tracks(q: str = "", user_id: str = Depends(get_user_id)):
         results = sp.search(q=q.strip(), type="track", limit=6)
         tracks = []
         for t in results["tracks"]["items"]:
-            img = None
-            if t["album"]["images"]:
-                # Pick smallest image for the dropdown thumbnail
-                img = t["album"]["images"][-1]["url"]
+            images = t["album"]["images"]
             tracks.append({
                 "name": t["name"],
                 "artist": t["artists"][0]["name"],
-                "image": img,
+                # Smallest image is last — right size for a dropdown thumbnail
+                "image": images[-1]["url"] if images else None,
             })
         return {"tracks": tracks}
     except Exception:
         return {"tracks": []}
 
-
-# ── Friends ────────────────────────────────────────────────────────────────────
-
-VALID_EMOJIS = {"🔥", "👀", "❤️"}
-
-@app.get("/invite-link")
-def get_invite_link(user_id: str = Depends(get_user_id)):
-    """Returns (or generates) the user's personal invite link."""
-    row = sb.table("users").select("invite_code").eq("id", user_id).execute()
-    code = row.data[0].get("invite_code") if row.data else None
-    if not code:
-        code = str(uuid.uuid4())[:8]
-        sb.table("users").update({"invite_code": code}).eq("id", user_id).execute()
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-    return {"link": f"{frontend_url}?invite={code}", "code": code}
-
-
-@app.post("/accept-invite")
-def accept_invite(code: str, user_id: str = Depends(get_user_id)):
-    """Called after login when an ?invite= param is in the URL."""
-    inviter = sb.table("users").select("id").eq("invite_code", code).execute()
-    if not inviter.data:
-        raise HTTPException(status_code=404, detail="Invite code not found.")
-    inviter_id = inviter.data[0]["id"]
-    if inviter_id == user_id:
-        return {"status": "self"}
-
-    # Check if already friends
-    a, b = sorted([user_id, inviter_id])
-    existing = sb.table("friendships") \
-        .select("id").eq("user_id_a", a).eq("user_id_b", b).execute()
-    if existing.data:
-        return {"status": "already_friends"}
-
-    sb.table("friendships").insert({"user_id_a": a, "user_id_b": b}).execute()
-    return {"status": "accepted"}
-
-
-@app.get("/friends")
-def get_friends(user_id: str = Depends(get_user_id)):
-    """Returns friends list with their today's nudge and reactions. No Spotify calls."""
-    today = date.today().isoformat()
-
-    # Collect friend IDs from both sides of the friendship
-    f1 = sb.table("friendships").select("user_id_b").eq("user_id_a", user_id).execute()
-    f2 = sb.table("friendships").select("user_id_a").eq("user_id_b", user_id).execute()
-    friend_ids = [r["user_id_b"] for r in f1.data] + [r["user_id_a"] for r in f2.data]
-
-    if not friend_ids:
-        return {"friends": []}
-
-    users_data = sb.table("users").select("id, display_name") \
-        .in_("id", friend_ids).execute()
-    user_map = {u["id"]: u for u in users_data.data}
-
-    # Today's nudge for each friend — already stored in Supabase, no Spotify needed
-    recs = sb.table("recommendations").select("*") \
-        .in_("user_id", friend_ids).eq("date", today).execute()
-    rec_map = {r["user_id"]: r for r in recs.data}
-
-    # Reactions on friends' nudges today
-    all_reactions = sb.table("nudge_reactions").select("*") \
-        .in_("nudge_owner_id", friend_ids).eq("date", today).execute()
-    reactions_by_owner: dict[str, list] = {}
-    for r in all_reactions.data:
-        reactions_by_owner.setdefault(r["nudge_owner_id"], []).append({
-            "emoji": r["emoji"],
-            "reactor_id": r["reactor_id"],
-        })
-
-    # My own reactions so the UI can show which one I already picked
-    my_reactions = sb.table("nudge_reactions").select("nudge_owner_id, emoji") \
-        .eq("reactor_id", user_id).eq("date", today).execute()
-    my_reaction_map = {r["nudge_owner_id"]: r["emoji"] for r in my_reactions.data}
-
-    friends = []
-    for fid in friend_ids:
-        rec = rec_map.get(fid)
-        friends.append({
-            "user_id": fid,
-            "display_name": user_map.get(fid, {}).get("display_name", "Friend"),
-            "nudge": rec,
-            "reactions": reactions_by_owner.get(fid, []),
-            "my_reaction": my_reaction_map.get(fid),
-        })
-
-    return {"friends": friends}
-
-
-@app.post("/react")
-def react_to_nudge(req: ReactionRequest, user_id: str = Depends(get_user_id)):
-    """React to a friend's nudge. One reaction per person per day, swappable."""
-    if req.emoji not in VALID_EMOJIS:
-        raise HTTPException(status_code=400, detail="Invalid emoji.")
-    today = date.today().isoformat()
-    sb.table("nudge_reactions").upsert({
-        "reactor_id": user_id,
-        "nudge_owner_id": req.friend_id,
-        "date": today,
-        "emoji": req.emoji,
-    }, on_conflict="reactor_id,nudge_owner_id,date").execute()
-    return {"reacted": True}

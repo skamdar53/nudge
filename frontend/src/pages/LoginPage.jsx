@@ -1,10 +1,8 @@
+import { loginUrl } from '../api'
+
 export default function LoginPage() {
   function handleLogin() {
-    const api = import.meta.env.VITE_API_URL || '/api'
-    // Preserve invite code across the OAuth redirect
-    const invite = new URLSearchParams(window.location.search).get('invite')
-    if (invite) localStorage.setItem('pending_invite', invite)
-    window.location.href = `${api}/login`
+    window.location.href = loginUrl()
   }
 
   return (
