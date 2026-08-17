@@ -6,13 +6,16 @@ nudge is a music discovery app that gives you a single album recommendation each
 
 **Live:** https://nudge-gray.vercel.app
 
+<a href="https://youtu.be/JksPk8t18Pc">
+  <img src="https://img.youtube.com/vi/JksPk8t18Pc/maxresdefault.jpg" width="600" alt="Watch the Nudge demo on YouTube">
+</a>
+
 ---
 
 ## Features
 
 - **Daily Nudge** — one album recommendation per day, with up to 3 "already heard it" skips
 - **Feel** — search any song and get tracks with the same sonic vibe
-- **Friends** — see what your friends got nudged today, react with emojis, invite via link
 - **Learns over time** — the more you interact, the better the picks get
 
 ---
@@ -200,5 +203,3 @@ The Spotify app must be in **Extended Quota Mode** for public use. In developmen
 | `heard_albums` | Permanent exclusion list of skipped albums |
 | `signals` | User interaction events (liked, disliked, listened, clicked) |
 | `spotify_tokens` | OAuth tokens stored in Supabase to survive server restarts |
-| `friendships` | Bidirectional friend pairs |
-| `nudge_reactions` | Emoji reactions on friends' daily nudges |
